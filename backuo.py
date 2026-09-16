@@ -114,7 +114,50 @@ class ObstacleAvoidanceNode(Node):
                 self.registerState("SCAN FORWARD", self.scan_angle)
                 self.endState(state)
         # elif (state == "UNDO SCAN"):
-        #     if (count > 0): # [counter] 
+        #     if (count > 0): # [counter] # cd rb2301_ca1
+        # colcon build --symlink-install
+        # ./gz_ca1.sh
+        # ./ca1.sh
+        # n = 9: 360 / 8 = 45 degree angles
+        self.last_scanTemp = self.last_scan[::2][:-1] # only 360 please
+
+        state = self.stateQ[0]
+        count = self.states[state][0]
+        mov = {"x": 0, "y": 0, "heading": 0}
+        # self.get_logger().debug(str(self.last_scan))
+
+        
+        # \033
+        # self.get_logger().debug(f"{state}:\tx{count}\thit: {self.analyseGeneralRays(*self.ranges["LEFT"], True):3f}")
+        self.get_logger().debug(f"{state}:\tx{count}\thit: {self.analyseGeneralRays(*self.ranges[self.rangesCurrent], True):3f}")
+        mov = self.STATE_SCAN(mov, state, count)
+
+        self.move_2D(mov["x"] * self.move_mult, mov["y"] * self.move_mult, mov["heading"])
+
+        ######################## MODIFY CODE HERE ########################
+    def STATE_SCAN(self, mov, state, count):
+        
+        if (state == "SCAN FORWARD"):
+            if (count > 0): # [counter] for this process
+                self.rangesCurrent = "FORWARD"
+                did_it_hit = self.analyseGeneralRays(*self.ranges["FORWARD"])
+                if (did_it_hit): # [continue]
+                    # console.log('still safe...')
+                    
+                    # if (self.scan_angle != 1):  # don't bother
+                    #     mov['heading'] = 1
+                    #     self.added_heading += 1 # turn left (to capture full if limited # of rays) 
+                    self.decState(state)
+                else : # [interrupt] hit something that way so it's blocked
+                    # add = self.scan_angle - self.states[state] # pass counter to undo rotation
+                    # self.registerState("UNDO SCAN", add)
+                    self.registerState("SCAN LEFT") # next stage
+                    self.endState(state)
+                
+            else : # [pass] counter over - it's safe
+                ...
+                # console.log('pass')
+                # self.registerState("UNDO SCAN", self.scan_angle)
         #         # self.registerState("BLOCKED", 1000000000000000000000)
         #         # return mov
         #         if (self.scan_angle != 1):  # don't bother
@@ -221,7 +264,7 @@ class ObstacleAvoidanceNode(Node):
     def other_init(self):
         # self.size = [10, 10]
         self.ambient_walk = 20
-        self.move_mult = 0.4     # program is slow :(
+        self.move_mult = 1.     # program is slow :(
         self.range_mult = 1.
 
         self.scan_angle = 1.   # doesn't work with other scan angles yet haha
@@ -236,10 +279,10 @@ class ObstacleAvoidanceNode(Node):
         }
         self.stateQ = ['SCAN FORWARD']
         self.ranges= {  # please adjust ranges because the lidar isn't actually centered on the robot as you see fit :)
-            "FORWARD":       [330     , 360+30  , .6], # please make sure ranges move forward
+            "FORWARD":       [330     , 360+30  , .25], # please make sure ranges move forward
             "BACKWARD":      [150     , 210     , .2],
-            "RIGHT":         [210     , 330     , .4],
-            "LEFT":          [30      , 150     , .4],
+            "RIGHT":         [210     , 330     , .2],
+            "LEFT":          [30      , 150     , .2],
             "BACK RIGHT":    [210 -10 , 240 + 10, .2],
             "BACK LEFT":     [120 -10 , 150 + 10, .2],
             "FORWARD RIGHT": [30 - 10 , 60 + 10 , .2],
