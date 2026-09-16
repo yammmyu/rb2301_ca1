@@ -1,11 +1,9 @@
-# https:#github.com/yonx30/rb2301_ca1/blob/main/src/rb2301_ca1/rb2301_ca1/obstacle_avoidance.py
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.logging import set_logger_level, LoggingSeverity
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
-from math import floor # +++
 
 np.set_printoptions(
     2, suppress=True
@@ -15,19 +13,28 @@ max_translate_velocity = 0.4 # Can be implemented as parameter
 max_turn_velocity = max_translate_velocity * 2 # Can be implemented as parameter
 set_logger_level("obstacle_avoidance", level=LoggingSeverity.DEBUG) # Configure to either LoggingSeverity.INFO or LoggingSeverity.DEBUG  
 
+# Gate tuning. Distances in metres, tick counts at the 20 Hz timer rate.
+FRONT_BLOCK = 0.55  # front nearer than this -> start dodging
+FRONT_CLEAR = 0.65  # front further than this -> episode is over (hysteresis)
+SIDE_BLOCK = 0.25  # the side we are strafing into counts as closed
+SIDE_OPEN = 0.35  # a side this open is enough to unfreeze us
+FLIP_MARGIN = 0.15  # opposite side must beat the chosen side by this to flip
+TRAP_TICKS = 5  # ~0.25 s of a blocked side before we believe we are trapped
+FREEZE_RETRY_TICKS = 60  # ~3 s frozen -> re-arm one flip and retry. None = freeze forever
+
 class ObstacleAvoidanceNode(Node):
     def __init__(self):
         """Node constructor"""
         super().__init__("obstacle_avoidance")
         self.get_logger().info("Starting Obstacle Avoidance")
-        self.other_init() # +++
 
         self.pub_cmd_vel = self.create_publisher(Twist, "cmd_vel", 10)  # Publish to cmd_vel node
         self.sub_scan = self.create_subscription(LaserScan, "scan", self.sub_scan_callback, 2) # The subscriber to the Lidar ranges.
         self.last_scan = None # Copied laser scan message
 
-        self.timer = self.create_timer(0.05, self.timer_callback)  # Runs at 20Hz. Can be changed.
+        self.reset_episode()  # Sets up the dodge state machine
 
+        self.timer = self.create_timer(0.05, self.timer_callback)  # Runs at 20Hz. Can be changed.
 
     def move_2D(self, x: float = 0.0, y: float = 0.0, turn: float = 0.0):
         """Publishes a twist command to move in 2D space. +ve x is forwards, +ve y is left, and +ve turn is anticlockwise"""
@@ -41,17 +48,32 @@ class ObstacleAvoidanceNode(Node):
 
     def sub_scan_callback(self, msg):
         """Scan subscriber"""
-        # self.last_scan = np.array(msg.ranges)[::20] # Slices the 721 scan array to return only 36 scans. Feel free to edit
-        self.last_scan = np.array(msg.ranges)
-    
+        self.last_scan = np.array(msg.ranges)[::20] # Slices the 721 scan array to return only 36 scans. Feel free to edit
 
-    # def sillyPrintMiddle(self): # only for scan_angle = 1
-    #     if self.rangesCurrent == "NONE": return '---'
+    def reset_episode(self):
+        """Back to cruising, with the flip gate closed until the front blocks again."""
+        self.state = "CRUISE"
+        self.dodge = 0  # +1 strafes left, -1 strafes right, 0 means "not dodging"
+        self.flips_left = 0  # the gate: one direction change per blocked episode
+        self.trap_ticks = 0
+        self.freeze_ticks = 0
+        self.freeze_dir = 0  # the direction we were strafing into when we froze
 
-    #     i = (self.ranges[self.rangesCurrent][0] + self.ranges[self.rangesCurrent][1])/2
-    #     id_ = i%len(self.last_scanTemp)
-    #     return f"{self.last_scanTemp[int(id_)]:3f}"
-    #     # is this correct?
+    def enter_dodge(self, left, right):
+        """Commit to the freer side and hand out one flip."""
+        self.state = "DODGE"
+        self.dodge = 1 if left > right else -1
+        self.flips_left = 1
+        self.trap_ticks = 0
+        self.freeze_ticks = 0
+
+    def drive_dodge(self, front, left, right):
+        """Creep forward while sidestepping so the obstacle leaves the front
+        sector sooner. Back out instead if we are already very close, or if
+        both sides are too tight to slip through."""
+        forward = -0.15 if (front < 0.20 or max(left, right) < 0.25) else 0.10
+        self.move_2D(forward, 0.30 * self.dodge, 0.0)
+
     def timer_callback(self):
         """Controller loop"""
 
@@ -59,258 +81,98 @@ class ObstacleAvoidanceNode(Node):
             return # Does not run if the laser message is not received.
         
         ######################## MODIFY CODE HERE ########################
-        # cd rb2301_ca1
-        # colcon build --symlink-install
-        # ./gz_ca1.sh
-        # ./ca1.sh
-        # n = 9: 360 / 8 = 45 degree angles
-        self.last_scanTemp = self.last_scan[::2][:-1] # only 360 please
+        # --- 1. Clean up the scan --------------------------------------------
+        # inf/nan mean the beam hit nothing. Anything below the lidar's 0.05 m
+        # minimum range is a bogus reading (the URDF warns the last beam can
+        # come back as a phantom 0.05). Treat both as "far away".
+        scan = np.array(self.last_scan, dtype=float)
+        scan[~np.isfinite(scan) | (scan < 0.06)] = 10.0
 
-        state = self.stateQ[0]
-        count = self.states[state][0]
-        mov = {"x": 0, "y": 0, "heading": 0}
-        # self.get_logger().debug(str(self.last_scan))
+        # Helper function to set as the detection as angles instead of just indexing
+        # The lidar is mounted rotated 180 deg (laser_joint rpy is 0 0 3.1416),
+        # so index 0 points straight ahead and the index grows anticlockwise.
+        deg = 360.0 / len(scan)  # degrees between beams (~10)
 
-        
-        # \033
-        # self.get_logger().debug(f"{state}:\tx{count}\thit: {self.analyseGeneralRays(*self.ranges["LEFT"], True):3f}")
-        self.get_logger().debug(f"{state}:\tx{count}\thit: {self.analyseGeneralRays(*self.ranges[self.rangesCurrent], True):3f}")
-        mov = self.STATE_SCAN(mov, state, count)
+        def arc(lo, hi):
+            """Nearest range within [lo, hi] degrees. 0 is front, +ve is left."""
+            i = np.arange(round(lo / deg), round(hi / deg) + 1)
+            return scan.take(i, mode="wrap").min()  # wrap handles -ve indices
 
-        self.move_2D(mov["x"] * self.move_mult, mov["y"] * self.move_mult, mov["heading"])
+        front = arc(-25, 25)
+        left = arc(20, 80)  # the beams we would strafe into, not just +-90 deg
+        right = arc(-80, -20)  # narrow these to +-30..80 if freezing is too eager
+
+        # --- 2. Dodge state machine ------------------------------------------
+        # CRUISE -> DODGE when the front blocks. The dodge direction is
+        # committed so the robot does not flip-flop every tick, but the gate
+        # (flips_left) buys exactly one reversal: if the side we chose closes
+        # up while the front is still blocked and the opposite side is clearly
+        # more open, we turn around and run that way instead. Spend the gate
+        # and get boxed in again -> FROZEN.
+        if self.state == "CRUISE":
+            if front < FRONT_BLOCK:
+                self.enter_dodge(left, right)
+                self.drive_dodge(front, left, right)
+            else:  # clear ahead: cruise
+                self.move_2D(0.25, 0.0, 0.0)
+
+        elif self.state == "DODGE":
+            if front > FRONT_CLEAR:  # we slipped past, forget the old dodge
+                self.reset_episode()
+                self.move_2D(0.25, 0.0, 0.0)
+            else:
+                chosen = left if self.dodge > 0 else right
+                other = right if self.dodge > 0 else left
+                # Debounced so one noisy beam cannot trigger a reversal.
+                self.trap_ticks = self.trap_ticks + 1 if chosen < SIDE_BLOCK else 0
+
+                if self.trap_ticks < TRAP_TICKS:
+                    self.drive_dodge(front, left, right)
+                elif self.flips_left > 0 and other > chosen + FLIP_MARGIN:
+                    self.dodge = -self.dodge
+                    self.flips_left -= 1
+                    self.trap_ticks = 0
+                    self.get_logger().info(
+                        f"Trapped ({chosen:.2f} m) - flipping to "
+                        f"{'left' if self.dodge > 0 else 'right'} ({other:.2f} m)"
+                    )
+                    self.drive_dodge(front, left, right)
+                else:
+                    # Gate already spent, or neither side is any better.
+                    self.state = "FROZEN"
+                    self.freeze_ticks = 0
+                    self.freeze_dir = self.dodge
+                    self.get_logger().info(
+                        f"Boxed in (front {front:.2f}, left {left:.2f}, "
+                        f"right {right:.2f}) - freezing"
+                    )
+                    self.move_2D(0.0, 0.0, 0.0)
+
+        else:  # FROZEN
+            # Only the side that trapped us counts. The side we came from is
+            # still open by definition, so testing max(left, right) here would
+            # unfreeze instantly and oscillate.
+            blocked_side = left if self.freeze_dir > 0 else right
+            if front > FRONT_CLEAR or blocked_side > SIDE_OPEN:
+                self.get_logger().info("Path opened up - resuming")
+                self.reset_episode()
+                self.move_2D(0.0, 0.0, 0.0)
+            elif FREEZE_RETRY_TICKS is not None and self.freeze_ticks >= FREEZE_RETRY_TICKS:
+                self.get_logger().info("Freeze timed out - retrying the dodge")
+                self.enter_dodge(left, right)  # re-arms the gate
+                self.drive_dodge(front, left, right)
+            else:
+                self.freeze_ticks += 1
+                self.move_2D(0.0, 0.0, 0.0)  # keep publishing zeros, do not just stop
+
+        self.get_logger().debug(
+            f"{self.state:6s} front {front:.2f} left {left:.2f} right {right:.2f} "
+            f"dodge {self.dodge:+d} flips {self.flips_left} | "
+            f"nearest beam at {np.argmin(scan) * deg:.0f} deg"
+        )
 
         ######################## MODIFY CODE HERE ########################
-    def STATE_SCAN(self, mov, state, count):
-        
-        if (state == "SCAN FORWARD"):
-            if (count > 0): # [counter] for this process
-                self.rangesCurrent = "FORWARD"
-                did_it_hit = self.analyseGeneralRays(*self.ranges["FORWARD"])
-                if (did_it_hit): # [continue]
-                    # console.log('still safe...')
-                    
-                    # if (self.scan_angle != 1):  # don't bother
-                    #     mov['heading'] = 1
-                    #     self.added_heading += 1 # turn left (to capture full if limited # of rays) 
-                    self.decState(state)
-                else : # [interrupt] hit something that way so it's blocked
-                    # add = self.scan_angle - self.states[state] # pass counter to undo rotation
-                    # self.registerState("UNDO SCAN", add)
-                    self.registerState("SCAN LEFT") # next stage
-                    self.endState(state)
-                
-            else : # [pass] counter over - it's safe
-                # console.log('pass')
-                # self.registerState("UNDO SCAN", self.scan_angle)
-                self.registerState("MOVE FORWARD", self.ambient_walk) # idk how much
-                self.endState(state)
-        
-        elif (state == "MOVE FORWARD"):
-            if (count > 0): # [counter]
-                mov["x"] = 1
-                self.decState(state)
-            
-            else : # [pass]
-                self.registerState("SCAN FORWARD", self.scan_angle)
-                self.endState(state)
-        # elif (state == "UNDO SCAN"):
-        #     if (count > 0): # [counter] 
-        #         # self.registerState("BLOCKED", 1000000000000000000000)
-        #         # return mov
-        #         if (self.scan_angle != 1):  # don't bother
-        #             mov['heading'] = -1; self.added_heading -= 1
 
-        #         self.decState(state)
-        #     else : # [pass]
-        #         # no registering state
-        #         self.endState(state)
-
-        elif (state == "BLOCKED"):
-            if (count > 0): # [counter] 
-                ...
-                self.decState(state)
-            else : # [pass]
-                self.registerState("SCAN FORWARD", self.scan_angle)
-                self.endState(state)
-        # ------------------------------------------------------
-        elif (state == "SCAN LEFT"): # pretty much same as other scans btw
-            if (count > 0): # [counter] for this process
-                self.rangesCurrent = "LEFT"
-                did_it_hit = self.analyseGeneralRays(*self.ranges["LEFT"])
-                if (did_it_hit): # [continue]
-                    if (self.scan_angle != 1):  # don't bother
-                        mov['heading'] = 1; self.added_heading += 1 # turn left 
-                    
-                    self.decState(state)
-                else : # [interrupt]
-                    # add = self.scan_angle - self.states[state] # pass counter to undo rotation
-                    # self.registerState("UNDO SCAN", add) # p.s. this would effectively do nothing if scan_angle = 1
-                    self.registerState("SCAN RIGHT") # next stage
-                    self.endState(state)
-            else : # [pass]
-                # self.registerState("UNDO SCAN", self.scan_angle)
-                self.registerState("MOVE LEFT", self.ambient_walk)
-                self.endState(state)
-            
-
-        elif (state == "SCAN RIGHT"): 
-            if (count > 0): # [counter] for this process
-                self.rangesCurrent = "RIGHT"
-                did_it_hit = self.analyseGeneralRays(*self.ranges["RIGHT"])
-                if (did_it_hit): # [continue]
-                    if (self.scan_angle != 1):  # don't bother
-                        mov['heading'] = 1; self.added_heading += 1 # turn left 
-                    
-                    self.decState(state)
-                else : # [interrupt]
-                    # add = self.scan_angle - self.states[state] 
-                    # self.registerState("UNDO SCAN", add)
-                    self.registerState("BLOCKED", 10000) # you promise no backtracking 😡
-                    self.endState(state)
-            else : # [pass]
-                # self.registerState("UNDO SCAN", self.scan_angle)
-                self.registerState("MOVE RIGHT", self.ambient_walk)
-                self.endState(state)
-            
-
-        elif (state == "MOVE LEFT"):
-            if (count > 0): # [counter]
-                mov["y"] = 1
-                self.decState(state)
-            
-            else : # [pass]
-                self.registerState("SCAN FORWARD", self.scan_angle)
-                self.endState(state)
-            
-        
-        elif (state == "MOVE RIGHT"):
-            if (count > 0): # [counter]
-                mov["y"] = -1
-                self.decState(state)
-            
-            else : # [pass]
-                self.registerState("SCAN FORWARD (RIGHT)", self.scan_angle)
-                self.endState(state)
-            
-
-        elif (state == "SCAN FORWARD (RIGHT)"):
-            if (count > 0): # [counter] for this process
-                self.rangesCurrent = "FORWARD"
-                did_it_hit = self.analyseGeneralRays(*self.ranges["FORWARD"])
-                if (did_it_hit): # [continue]
-                    if (self.scan_angle != 1):  # don't bother
-                        mov['heading'] = 1; self.added_heading += 1 # turn left
-                    
-                    self.decState(state)
-                else : # [interrupt]
-                    # add = self.scan_angle - self.states[state] 
-                    # self.registerState("UNDO SCAN", add)
-                    # [B1] right bias
-                    self.registerState("SCAN RIGHT") # next stage
-                    self.endState(state)
-                
-            else : # [pass] counter over - it's safe
-                # self.registerState("UNDO SCAN", self.scan_angle)
-                self.registerState("MOVE FORWARD", self.ambient_walk) # idk how much
-                self.endState(state)
-            
-
-        return mov
-
-
-    def other_init(self):
-        # self.size = [10, 10]
-        self.ambient_walk = 20
-        self.move_mult = 1.     # program is slow :(
-        self.range_mult = 1.
-
-        self.scan_angle = 1.   # doesn't work with other scan angles yet haha
-        self.last_scanTemp = []
-        self.loc = [0, 0]                 
-
-        self.heading = 0
-        # self.hit_size = .1
-        self.states = {
-            'SCAN FORWARD': [self.scan_angle, ],
-            # 'BLOCKED': [], # assign default here
-        }
-        self.stateQ = ['SCAN FORWARD']
-        self.ranges= {  # please adjust ranges because the lidar isn't actually centered on the robot as you see fit :)
-            "FORWARD":       [330     , 360+30  , .25], # please make sure ranges move forward
-            "BACKWARD":      [150     , 210     , .2],
-            "RIGHT":         [210     , 330     , .2],
-            "LEFT":          [30      , 150     , .2],
-            "BACK RIGHT":    [210 -10 , 240 + 10, .2],
-            "BACK LEFT":     [120 -10 , 150 + 10, .2],
-            "FORWARD RIGHT": [30 - 10 , 60 + 10 , .2],
-            "FORWARD LEFT":  [300 - 10, 330 + 10, .2],
-            "ALL": [0, 359, 0.2],
-            "NONE": [None, None]
-        }
-        for key in self.ranges.keys():
-            if len(self.ranges[key]) >= 3:
-                self.ranges[key][2] *= self.range_mult
-
-        self.rangesCurrent = 'NONE'
-        
-        self.pred_loc = self.loc
-        self.pred_heading = self.heading
-        self.added_heading = 0
-
-    def registerState(self, state, counter=1):
-        self.stateQ.append(state)
-        if (state not in self.states): 
-            self.states[state] = []
-        self.states[state].append(counter) 
-    
-    def endState(self, state):
-        self.states[state] = self.states[state][1:]
-        self.stateQ = self.stateQ[1:]
-    
-    def decState(self, state):
-        self.states[state][0] -= 1
-
-    def AInRange(self, a, l, u): # check if angle between 
-        return (a - l)%360 <= (u - l)%360
-    
-    def analyseGeneralRays(self, startT, endT, hitDist=0.3, take_Min=False):
-
-        # unnecessary:
-        min_ = float('inf')
-        if startT is None: return False
-
-        arrL = len(self.last_scanTemp)
-        s = floor(startT / self.scan_angle)
-        e = floor(endT / self.scan_angle) 
-        i = s
-
-
-        while((i%arrL) != ((e + 1)%arrL) ):
-            check = 0
-            id_ = i%arrL
-            start = self.scan_angle * (id_)
-            target = self.scan_angle * (id_+1)%arrL
-            current = self.scan_angle * (id_) + self.added_heading
-            if (i == s):
-                if (self.AInRange(current, startT, target)):   
-                    check = 1
-            elif (i == e): 
-                if (self.AInRange(current, start, endT)):
-                    check = 2
-            else: 
-                check = 3 
-
-            # self.get_logger().debug(f"{ check } {id_}")
-            if ((check)>0 and take_Min): 
-                min_ = min(min_, self.last_scanTemp[id_])
-            if ((check>0) and (self.last_scanTemp[id_] < hitDist)):
-
-                if (not take_Min): return False
-            
-            i+=1
-        if (take_Min): return min_
-        
-        return True 
 
 def main(args=None):
     rclpy.init(args=args)
