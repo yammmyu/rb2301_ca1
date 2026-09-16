@@ -1,0 +1,33 @@
+# --- ROS 2 / colcon build artifacts ---
+build/
+install/
+log/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+*.egg
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- VS Code (local editor config, not shared) ---
+.vscode/
+
+# --- ROS bags / recorded data ---
+*.db3
+*.mcap
+*.bag
+bag_*/
+log_dir_*/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+*~
+*.swp
