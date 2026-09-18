@@ -26,7 +26,7 @@ class ObstacleAvoidanceNode(Node):
         self.sub_scan = self.create_subscription(LaserScan, "scan", self.sub_scan_callback, 2) # The subscriber to the Lidar ranges.
         self.last_scan = None # Copied laser scan message
 
-        self.timer = self.create_timer(0.05, self.timer_callback)  # Runs at 20Hz. Can be changed.
+        self.timer = self.create_timer(0.025, self.timer_callback)  # Runs at 20Hz. Can be changed.
 
 
     def move_2D(self, x: float = 0.0, y: float = 0.0, turn: float = 0.0):
@@ -221,7 +221,7 @@ class ObstacleAvoidanceNode(Node):
     def other_init(self):
         # self.size = [10, 10]
         self.ambient_walk = 20
-        self.move_mult = 0.4     # program is slow :(
+        self.move_mult = 0.2     # program is slow :(
         self.range_mult = 1.
 
         self.scan_angle = 1.   # doesn't work with other scan angles yet haha
@@ -236,10 +236,10 @@ class ObstacleAvoidanceNode(Node):
         }
         self.stateQ = ['SCAN FORWARD']
         self.ranges= {  # please adjust ranges because the lidar isn't actually centered on the robot as you see fit :)
-            "FORWARD":       [330     , 360+30  , .6], # please make sure ranges move forward
+            "FORWARD":       [330     , 360+30  , .5], # please make sure ranges move forward
             "BACKWARD":      [150     , 210     , .2],
-            "RIGHT":         [210     , 330     , .4],
-            "LEFT":          [30      , 150     , .4],
+            "RIGHT":         [210     , 330     , .3],
+            "LEFT":          [30      , 150     , .3],
             "BACK RIGHT":    [210 -10 , 240 + 10, .2],
             "BACK LEFT":     [120 -10 , 150 + 10, .2],
             "FORWARD RIGHT": [30 - 10 , 60 + 10 , .2],
