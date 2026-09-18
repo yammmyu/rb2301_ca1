@@ -26,7 +26,7 @@ class ObstacleAvoidanceNode(Node):
         self.sub_scan = self.create_subscription(LaserScan, "scan", self.sub_scan_callback, 2) # The subscriber to the Lidar ranges.
         self.last_scan = None # Copied laser scan message
 
-        self.timer = self.create_timer(0.025, self.timer_callback)  # Runs at 20Hz. Can be changed.
+        self.timer = self.create_timer(0.05, self.timer_callback)  # Runs at 20Hz. Can be changed.
 
 
     def move_2D(self, x: float = 0.0, y: float = 0.0, turn: float = 0.0):
@@ -66,21 +66,28 @@ class ObstacleAvoidanceNode(Node):
         # n = 9: 360 / 8 = 45 degree angles
         self.last_scanTemp = self.last_scan[::2][:-1] # only 360 please
 
-        state = self.stateQ[0]
-        count = self.states[state][0]
         mov = {"x": 0, "y": 0, "heading": 0}
         # self.get_logger().debug(str(self.last_scan))
 
-        
+        # Decision states (the SCANs, and the [pass] tick that hands over to the next
+        # state) produce no movement. Running only one of them per tick meant every
+        # scan cycle published a zero Twist for ~3 ticks, so the robot stuttered to a
+        # halt between each walk. Instead, keep stepping the FSM within this tick
+        # until it reaches a state that actually commands something.
+        for _ in range(self.max_fsm_steps):
+            state = self.stateQ[0]
+            count = self.states[state][0]
+            mov = self.STATE_SCAN(mov, state, count)
+
+            moving = (mov["x"] or mov["y"] or mov["heading"])
+            if moving or (state in self.hold_states and self.stateQ[0] == state):
+                break # This state owns the tick - publish what it asked for.
+
         # \033
         # self.get_logger().debug(f"{state}:\tx{count}\thit: {self.analyseGeneralRays(*self.ranges["LEFT"], True):3f}")
         self.get_logger().debug(f"{state}:\tx{count}\thit: {self.analyseGeneralRays(*self.ranges[self.rangesCurrent], True):3f}")
-        mov = self.STATE_SCAN(mov, state, count)
 
-        if (state == "SCAN FORWARD" or state =="SCAN FORWARD (RIGHT)"):
-            ...
-        else:
-            self.move_2D(mov["x"] * self.move_mult, mov["y"] * self.move_mult, mov["heading"])
+        self.move_2D(mov["x"] * self.move_mult, mov["y"] * self.move_mult, mov["heading"])
 
         ######################## MODIFY CODE HERE ########################
     def STATE_SCAN(self, mov, state, count):
@@ -129,10 +136,9 @@ class ObstacleAvoidanceNode(Node):
         #         self.endState(state)
 
         elif (state == "BLOCKED"):
-            if (count > 0): # [counter] 
-                ...
+            if (count > 0): # [counter] sit still
                 self.decState(state)
-            else : # [pass]
+            else : # [pass] stop waiting and rescan from scratch
                 self.registerState("SCAN FORWARD", self.scan_angle)
                 self.endState(state)
         # ------------------------------------------------------
@@ -168,7 +174,7 @@ class ObstacleAvoidanceNode(Node):
                 else : # [interrupt]
                     # add = self.scan_angle - self.states[state] 
                     # self.registerState("UNDO SCAN", add)
-                    self.registerState("BLOCKED", 10000) # you promise no backtracking 😡
+                    self.registerState("BLOCKED", self.blocked_pause) # you promise no backtracking 😡
                     self.endState(state)
             else : # [pass]
                 # self.registerState("UNDO SCAN", self.scan_angle)
@@ -224,8 +230,14 @@ class ObstacleAvoidanceNode(Node):
     def other_init(self):
         # self.size = [10, 10]
         self.ambient_walk = 20
-        self.move_mult = 0.2     # program is slow :(
+        self.move_mult = 0.3     # program is slow :(
         self.range_mult = 1.
+
+        # States that legitimately hold the robot still for a counted number of ticks.
+        # Everything else is a decision state and must not cost the robot any motion.
+        self.hold_states = {"MOVE FORWARD", "MOVE LEFT", "MOVE RIGHT", "BLOCKED"}
+        self.blocked_pause = 20 # Ticks to sit blocked before rescanning from scratch
+        self.max_fsm_steps = 16 # Safety cap so a bad transition can't spin the loop forever
 
         self.scan_angle = 1.   # doesn't work with other scan angles yet haha
         self.last_scanTemp = []
@@ -239,10 +251,10 @@ class ObstacleAvoidanceNode(Node):
         }
         self.stateQ = ['SCAN FORWARD']
         self.ranges= {  # please adjust ranges because the lidar isn't actually centered on the robot as you see fit :)
-            "FORWARD":       [330     , 360+30  , .5], # please make sure ranges move forward
-            "BACKWARD":      [150     , 210     , .2],
-            "RIGHT":         [210     , 330     , .3],
-            "LEFT":          [30      , 150     , .3],
+            "FORWARD":       [340     , 360+20  , .5], # please make sure ranges move forward
+            "BACKWARD":      [120     , 230     , .2],
+            "RIGHT":         [230     , 340     , .3],
+            "LEFT":          [20      , 120     , .3],
             "BACK RIGHT":    [210 -10 , 240 + 10, .2],
             "BACK LEFT":     [120 -10 , 150 + 10, .2],
             "FORWARD RIGHT": [30 - 10 , 60 + 10 , .2],
