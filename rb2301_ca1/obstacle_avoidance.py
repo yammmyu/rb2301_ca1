@@ -77,7 +77,10 @@ class ObstacleAvoidanceNode(Node):
         self.get_logger().debug(f"{state}:\tx{count}\thit: {self.analyseGeneralRays(*self.ranges[self.rangesCurrent], True):3f}")
         mov = self.STATE_SCAN(mov, state, count)
 
-        self.move_2D(mov["x"] * self.move_mult, mov["y"] * self.move_mult, mov["heading"])
+        if (state == "SCAN FORWARD" or state =="SCAN FORWARD (RIGHT)"):
+            ...
+        else:
+            self.move_2D(mov["x"] * self.move_mult, mov["y"] * self.move_mult, mov["heading"])
 
         ######################## MODIFY CODE HERE ########################
     def STATE_SCAN(self, mov, state, count):
